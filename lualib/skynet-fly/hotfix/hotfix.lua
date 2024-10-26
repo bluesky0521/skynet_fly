@@ -2,6 +2,10 @@ local contriner_interface = require "skynet-fly.contriner.contriner_interface"
 local SERVER_STATE_TYPE = require "skynet-fly.enum.SERVER_STATE_TYPE"
 local log = require "skynet-fly.log"
 local string_util = require "skynet-fly.utils.string_util"
+local file_util = require "skynet-fly.utils.file_util"
+local time_util = require "skynet-fly.utils.time_util"
+local module_info = require "skynet-fly.etc.module_info"
+local skynet = require "skynet"
 
 local old_require = require
 local assert = assert
@@ -14,11 +18,15 @@ local string = string
 local rawget = rawget
 local tinsert = table.insert
 local tsort = table.sort
+local sgsub = string.gsub
+
+local g_recordpath = skynet.getenv("recordpath")
 
 local g_loadedmap = {}
 local M = {}
 
 local g_seq = 1
+local g_patch = 0
 
 local g_tb = _G
 
@@ -38,6 +46,31 @@ local g_mata = {
 
 setmetatable(g_dummy_env, g_mata)
 
+local function get_patch_file_path(file_path, patch_dir)
+    local depth = 0
+    for w in string.gmatch(file_path, "%.%.%/") do
+        depth = depth + 1
+    end
+    local path = patch_dir
+    local pat = ""
+    if depth == 0 then
+        path = path .. 'cur/'
+        pat = './'
+    else
+        for i = 1, depth do
+            path = path .. 'pre/'
+            pat = pat .. '../'
+        end
+    end
+    
+    return sgsub(file_path, pat, path, 1)
+end
+
+local function get_patch_dir()
+    local base_info = module_info.get_base_info()
+    return file_util.path_join(g_recordpath, string.format("hotfix_%s/patch_%s/", base_info.module_name, g_patch))
+end
+
 --可热更模块加载
 function M.require(name)
     if g_loadedmap[name] then
@@ -47,11 +80,11 @@ function M.require(name)
 
     assert(contriner_interface:get_server_state() == SERVER_STATE_TYPE.loading)     --必须load阶段require，否则不好记录文件修改时间
 	local package = g_tb.package
-    local f_dir = package.searchpath(name, package.path)
-    assert(f_dir, "hot_require err can`t find module = " .. name)
+    local f_path = package.searchpath(name, package.path)
+    assert(f_path, "hot_require err can`t find module = " .. name)
 
     g_loadedmap[name] = {
-        dir = f_dir,
+        path = f_path,
         seq = g_seq,
     }
     g_seq = g_seq + 1
@@ -60,6 +93,14 @@ end
 
 --热更
 function M.hotfix(hotfixmods)
+    local base_info = module_info.get_base_info()
+    g_patch = g_patch + 1
+
+    local patch_dir
+    if skynet.is_record_handle() then              --说明是播放录像
+        patch_dir = get_patch_dir()
+    end
+
     local hot_ret = {}
     local name_list = string_util.split(hotfixmods, '|')
     local sort_list = {}
@@ -75,13 +116,17 @@ function M.hotfix(hotfixmods)
             seq = info.seq,
         })
     end
+
     tsort(sort_list, function(a, b) return a.seq > b.seq end)
     
     for _,info in ipairs(sort_list) do
         local name = info.name
         local info = g_loadedmap[name]
-        local dir = info.dir
-        local mainfunc = loadfile(dir, "t", g_dummy_env)
+        local path = info.path
+        if patch_dir then
+            path = get_patch_file_path(path, patch_dir)
+        end
+        local mainfunc = loadfile(path, "t", g_dummy_env)
         if not mainfunc then
             log.warn_fmt("hotfix loadfile err name:%s", name)
             hot_ret[name] = "loadfile err"
@@ -158,7 +203,33 @@ function M.hotfix(hotfixmods)
         else
             log.info("hotfix ok ", name)
             hot_ret[name] = "ok:" .. i
-        end        
+        end
+    end
+
+    if skynet.is_write_record() and base_info.index == 1 then --第一个启动记录下就行
+        local patch_dir = get_patch_dir()
+        local pathcmd = ""
+        local dir_path_map = {}
+        for i, info in ipairs(sort_list) do
+            local name = info.name
+            local info = g_loadedmap[name]
+            local path = info.path
+            local new_path = get_patch_file_path(path, patch_dir)
+            local filename = string.match(path, "([^/]+%.lua)$")
+            local dir_path = sgsub(new_path, filename, '', 1)
+            dir_path_map[dir_path] = true
+            pathcmd = pathcmd .. string.format('cp %s %s;\n', path, new_path)
+        end
+
+        local mkcmd = "mkdir -p "
+        for dir_path in pairs(dir_path_map) do
+            mkcmd = mkcmd .. dir_path .. ' '
+        end
+        mkcmd = mkcmd .. ';' .. pathcmd
+        local isok, err = os.execute(mkcmd)
+        if not isok then
+            log.error("record cp file err ", err)
+        end
     end
 
     return true,hot_ret

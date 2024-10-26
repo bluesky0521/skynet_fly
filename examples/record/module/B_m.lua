@@ -3,6 +3,13 @@ local log = require "skynet-fly.log"
 local httpc = require "http.httpc"
 local contriner_client = require "skynet-fly.client.contriner_client"
 local socket = require "skynet.socket"
+local timer = require "skynet-fly.timer"
+local hotfix_func = hotfix_require "testhotfix.hotfix_func"
+local hotfix_table = hotfix_require "testhotfix.hotfix_table"
+local com_test_hotfix = hotfix_require "com_test_hotfix"
+local ccom_test_hotfix = hotfix_require "common.com_test_hotfix"
+local sharedata = require "skynet-fly.sharedata"
+
 contriner_client:register("A_m", "share_config_m")
 
 local CMD = {}
@@ -122,6 +129,31 @@ local function test_ostime()
     end
 end
 
+--测试热更
+local function test_hotfix()
+    timer:new(timer.second * 5, 0, function()
+        log.info("hotfixtest:", hotfix_func.hello())
+        log.info("hotfixtest:", hotfix_table)
+        log.info("com_test_hotfix:", com_test_hotfix.hello())
+        log.info("ccom_test_hotfix:", ccom_test_hotfix.hello())
+    end)
+end
+
+--测试共享数据
+local function test_share_data()
+    local l_sharedata_test = sharedata:new('./sharedata/test_data.lua', sharedata.enum.sharedata):builder()
+    local c_sharedata_test = sharedata:new('../../commonlualib/sharedata/test_data.lua', sharedata.enum.sharedata):builder()
+    local l_sharetable_test = sharedata:new('./sharetable/test_data.lua', sharedata.enum.sharetable):builder()
+    local c_sharetable_test = sharedata:new('../../commonlualib/sharetable/test_data.lua', sharedata.enum.sharetable):builder()
+
+    timer:new(timer.second * 5, 0, function()
+        log.info("l_sharedata_test >>> ", l_sharedata_test:get_data_table())
+        log.info("c_sharedata_test >>> ", c_sharedata_test:get_data_table())
+        log.info("l_sharetable_test >>> ", l_sharetable_test:get_data_table())
+        log.info("c_sharetable_test >>> ", c_sharetable_test:get_data_table())
+    end)
+end
+
 function CMD.start()
     skynet.fork(function()
         test_service_api()
@@ -132,6 +164,8 @@ function CMD.start()
         test_utp()
         test_math_rand()
         test_ostime()
+        test_hotfix()
+        test_share_data()
     end)
     return true
 end
